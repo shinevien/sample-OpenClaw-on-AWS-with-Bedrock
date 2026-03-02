@@ -78,8 +78,31 @@ Parameters:
 
   LLMModel:
     Type: String
-    Default: "deepseek-ai/DeepSeek-V3"
-    Description: "Model ID for your LLM provider. Common SiliconFlow models: deepseek-ai/DeepSeek-V3, deepseek-ai/DeepSeek-R1, Qwen/Qwen2.5-72B-Instruct, Pro/deepseek-ai/DeepSeek-V3"
+    Default: "Pro/deepseek-ai/DeepSeek-V3"
+    Description: "SiliconFlow model ID. Pro/ models recommended for Marketplace subscribers (better performance and rate limits). Full model list: https://docs.siliconflow.cn/cn/userguide/models"
+    AllowedValues:
+      # DeepSeek Pro (recommended for Marketplace subscribers)
+      - "Pro/deepseek-ai/DeepSeek-V3"
+      - "Pro/deepseek-ai/DeepSeek-R1"
+      - "Pro/deepseek-ai/DeepSeek-V3.2"
+      - "Pro/deepseek-ai/DeepSeek-V3.1-Terminus"
+      # DeepSeek standard (free tier, lower rate limits)
+      - "deepseek-ai/DeepSeek-V3"
+      - "deepseek-ai/DeepSeek-R1"
+      - "deepseek-ai/DeepSeek-V3.2"
+      # Qwen (Alibaba)
+      - "Qwen/Qwen3-32B"
+      - "Qwen/Qwen3-14B"
+      - "Qwen/Qwen3-8B"
+      - "Qwen/Qwen2.5-72B-Instruct"
+      # GLM (Zhipu AI)
+      - "Pro/zai-org/GLM-4.7"
+      - "zai-org/GLM-4.6"
+      # Tencent
+      - "tencent/Hunyuan-A13B-Instruct"
+      # Cost-effective distilled models
+      - "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+      - "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
 
   LLMApiKey:
     Type: String
