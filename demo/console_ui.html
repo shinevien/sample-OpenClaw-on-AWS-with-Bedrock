@@ -220,6 +220,7 @@ tr:last-child td{border-bottom:none}tr:hover td{background:rgba(139,92,246,0.04)
 <script>
 const A=async(p,m='GET',b=null)=>{const o={method:m,headers:{'Content-Type':'application/json'}};if(b)o.body=JSON.stringify(b);return(await fetch(p,o)).json()};
 const ago=iso=>{const s=Math.floor((Date.now()-new Date(iso))/1000);if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';if(s<86400)return Math.floor(s/3600)+'h';return Math.floor(s/86400)+'d'};
+const esc=s=>{const d=document.createElement('div');d.textContent=s;return d.innerHTML};
 const B=(t,c)=>`<span class="b b-${c}">${t}</span>`;
 const evB=e=>e==='permission_denied'?B('DENIED','red'):e==='approval_decision'?B('APPROVAL','pur'):B('OK','grn');
 const stB=s=>({active:B('<span class="pulse pulse-grn"></span> Active','grn'),inactive:B('Inactive','gry'),pending:B('Pending','yel'),approved:B('Approved','grn'),rejected:B('Rejected','red'),approvedd:B('Approved','grn'),rejectedd:B('Rejected','red')})[s]||B(s,'gry');
@@ -248,11 +249,11 @@ async function lDash(){
 async function lTen(){
   const d=await A('/api/tenants');
   document.getElementById('ten-tbl').innerHTML='<table><tr><th>Tenant</th><th>Role</th><th>Dept</th><th>Channel</th><th>Permissions</th><th>Status</th></tr>'+
-    d.tenants.map(t=>`<tr onclick="eTen('${t.id}')" style="cursor:pointer"><td><strong>${t.name}</strong><br><span style="color:var(--t3);font-size:11px">${t.id}</span></td><td>${t.role}</td><td>${t.dept}</td><td>${B(t.ch,'teal')}</td><td>${tt(t.tools)}</td><td>${stB(t.status)}</td></tr>`).join('')+'</table>';
+    d.tenants.map(t=>`<tr onclick="eTen('${esc(t.id)}')" style="cursor:pointer"><td><strong>${esc(t.name)}</strong><br><span style="color:var(--t3);font-size:11px">${esc(t.id)}</span></td><td>${esc(t.role)}</td><td>${esc(t.dept)}</td><td>${B(esc(t.ch),'teal')}</td><td>${tt(t.tools)}</td><td>${stB(t.status)}</td></tr>`).join('')+'</table>';
   document.getElementById('ten-edit').innerHTML=''}
 async function eTen(id){
   const t=await A('/api/tenants/'+id);const a=['web_search','shell','browser','file','file_write','code_execution'],bl=['install_skill','load_extension','eval'];
-  document.getElementById('ten-edit').innerHTML=`<div class="pe"><div style="display:flex;justify-content:space-between;align-items:center"><div><strong style="font-size:16px">${t.name}</strong><span style="color:var(--t2);margin-left:8px">${t.role} · ${t.dept}</span></div>${B(t.profile,'pur')}</div>
+  document.getElementById('ten-edit').innerHTML=`<div class="pe"><div style="display:flex;justify-content:space-between;align-items:center"><div><strong style="font-size:16px">${esc(t.name)}</strong><span style="color:var(--t2);margin-left:8px">${esc(t.role)} · ${esc(t.dept)}</span></div>${B(esc(t.profile),'pur')}</div>
     <p style="color:var(--t2);font-size:12px;margin-top:10px">Click to toggle permissions. Red tools are always blocked (supply-chain protection).</p>
     <div class="pe-grid">${a.map(x=>`<div class="pt ${t.tools.includes(x)?'on':'off'}" onclick="tog('${id}','${x}')">${t.tools.includes(x)?'✓':'✗'} ${x}</div>`).join('')}${bl.map(x=>`<div class="pt blk">🚫 ${x}</div>`).join('')}</div></div>`}
 async function tog(id,tool){const t=await A('/api/tenants/'+id);let tools=[...t.tools];if(tools.includes(tool))tools=tools.filter(x=>x!==tool);else tools.push(tool);await A('/api/tenants/'+id,'PUT',{tools});eTen(id)}
@@ -260,8 +261,8 @@ async function tog(id,tool){const t=await A('/api/tenants/'+id);let tools=[...t.
 async function lAppr(){
   const d=await A('/api/approvals');const p=d.items.filter(a=>a.status==='pending'),done=d.items.filter(a=>a.status!=='pending');
   let h='';if(!p.length)h='<div style="text-align:center;padding:60px;color:var(--t2);font-size:15px">✨ No pending approvals — all clear</div>';
-  p.forEach(a=>{h+=`<div class="ac"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div><strong style="font-size:15px">${a.name}</strong> <span style="color:var(--t2)">${a.tid}</span><div style="color:var(--t2);font-size:12px;margin-top:4px">Requesting: <strong style="color:var(--t)">${a.res}</strong> (${a.rtype})</div></div><div style="display:flex;gap:6px">${rB(a.risk)} ${stB(a.status)}</div></div><div class="ac-reason">${a.reason}</div><div style="color:var(--t3);font-size:12px">Requested ${ago(a.at)} ago · Auto-reject in ${ago(a.exp)}</div><div style="display:flex;gap:10px;margin-top:18px"><button class="btn bg" onclick="apA('${a.id}','approve')">✓ Approve (Temporary)</button><button class="btn br" onclick="apA('${a.id}','reject')">✗ Reject</button></div></div>`});
-  if(done.length){h+='<div style="margin-top:28px;font-weight:600;color:var(--t3);font-size:12px;text-transform:uppercase;letter-spacing:.8px">Resolved</div>';done.forEach(a=>{h+=`<div class="ac" style="opacity:.4"><div style="display:flex;justify-content:space-between"><div><strong>${a.name}</strong> — ${a.res}</div>${stB(a.status)}</div></div>`})}
+  p.forEach(a=>{h+=`<div class="ac"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div><strong style="font-size:15px">${esc(a.name)}</strong> <span style="color:var(--t2)">${esc(a.tid)}</span><div style="color:var(--t2);font-size:12px;margin-top:4px">Requesting: <strong style="color:var(--t)">${esc(a.res)}</strong> (${esc(a.rtype)})</div></div><div style="display:flex;gap:6px">${rB(a.risk)} ${stB(a.status)}</div></div><div class="ac-reason">${esc(a.reason)}</div><div style="color:var(--t3);font-size:12px">Requested ${ago(a.at)} ago · Auto-reject in ${ago(a.exp)}</div><div style="display:flex;gap:10px;margin-top:18px"><button class="btn bg" onclick="apA('${esc(a.id)}','approve')">✓ Approve (Temporary)</button><button class="btn br" onclick="apA('${esc(a.id)}','reject')">✗ Reject</button></div></div>`});
+  if(done.length){h+='<div style="margin-top:28px;font-weight:600;color:var(--t3);font-size:12px;text-transform:uppercase;letter-spacing:.8px">Resolved</div>';done.forEach(a=>{h+=`<div class="ac" style="opacity:.4"><div style="display:flex;justify-content:space-between"><div><strong>${esc(a.name)}</strong> — ${esc(a.res)}</div>${stB(a.status)}</div></div>`})}
   document.getElementById('appr-list').innerHTML=h}
 async function apA(id,act){await A('/api/approvals/'+id+'/'+act,'POST');lAppr();lDash()}
 
@@ -271,15 +272,15 @@ async function lAud(){
     const c=e.ev==='permission_denied'?'var(--red)':e.ev==='approval_decision'?'var(--pur2)':'var(--grn)';
     return`<div class="le"><span style="color:var(--t3);min-width:70px">${ago(e.ts)} ago</span><span style="color:${c};min-width:160px;font-weight:600">${e.ev}</span><span style="color:var(--teal);min-width:180px">${e.tid}</span><span style="color:var(--t2)">${e.tool||e.status||''}</span><span style="color:var(--t3);margin-left:auto">${e.ms}ms</span></div>`}).join('')||'<div style="padding:40px;text-align:center;color:var(--t2)">No events</div>'}
 
-async function lDemo(){const d=await A('/api/tenants');document.getElementById('d-who').innerHTML=d.tenants.map(t=>`<option value="${t.id}">${t.name} (${t.role})</option>`).join('')}
+async function lDemo(){const d=await A('/api/tenants');document.getElementById('d-who').innerHTML=d.tenants.map(t=>`<option value="${esc(t.id)}">${esc(t.name)} (${esc(t.role)})</option>`).join('')}
 async function send(){
   const tid=document.getElementById('d-who').value,msg=document.getElementById('d-msg').value.trim();if(!msg)return;document.getElementById('d-msg').value='';
   const t=await A('/api/tenants/'+tid),ch=document.getElementById('chat'),det=document.getElementById('details');
-  ch.innerHTML+=`<div class="msg usr"><div class="who">${t.name} (${t.role})</div><div class="bbl">${msg}</div></div>`;
+  ch.innerHTML+=`<div class="msg usr"><div class="who">${esc(t.name)} (${esc(t.role)})</div><div class="bbl">${esc(msg)}</div></div>`;
   const r=await A('/api/demo/send','POST',{tenant_id:tid,message:msg});
-  ch.innerHTML+=`<div class="msg agt"><div class="who">🦞 OpenClaw Agent</div><div class="bbl">${r.response}</div></div>`;
-  if(r.violations?.length)ch.innerHTML+=`<div class="msg vio"><div class="bbl">⚠️ Plan E AUDIT: blocked tool detected: ${r.violations.join(', ')}</div></div>`;
-  det.innerHTML=`<div class="msg sys"><div class="bbl"><b>Tenant:</b> ${tid}\n<b>Profile:</b> ${t.profile}\n<b>Allowed:</b> ${t.tools.join(', ')}</div></div><div class="msg sys"><div class="bbl"><b>Plan A (System Prompt):</b>\n${r.sp}</div></div><div class="msg sys"><div class="bbl"><b>Plan E (Response Audit):</b> ${r.plan_e}${r.violations?.length?'\nViolations: '+r.violations.join(', '):''}</div></div>`+det.innerHTML;
+  ch.innerHTML+=`<div class="msg agt"><div class="who">🦞 OpenClaw Agent</div><div class="bbl">${esc(r.response)}</div></div>`;
+  if(r.violations?.length)ch.innerHTML+=`<div class="msg vio"><div class="bbl">⚠️ Plan E AUDIT: blocked tool detected: ${esc(r.violations.join(', '))}</div></div>`;
+  det.innerHTML=`<div class="msg sys"><div class="bbl"><b>Tenant:</b> ${esc(tid)}\n<b>Profile:</b> ${esc(t.profile)}\n<b>Allowed:</b> ${esc(t.tools.join(', '))}</div></div><div class="msg sys"><div class="bbl"><b>Plan A (System Prompt):</b>\n${esc(r.sp)}</div></div><div class="msg sys"><div class="bbl"><b>Plan E (Response Audit):</b> ${esc(r.plan_e)}${r.violations?.length?'\nViolations: '+esc(r.violations.join(', ')):''}</div></div>`+det.innerHTML;
   ch.scrollTop=ch.scrollHeight}
 
 // ===== ROADMAP PAGES =====
