@@ -8,7 +8,7 @@ Click the button below to launch in your AWS account:
 
 | Region | Launch |
 |--------|--------|
-| **US East (N. Virginia)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?stackName=openclaw-lab&templateURL=https://raw.githubusercontent.com/shinevien/sample-OpenClaw-on-AWS-with-Bedrock/main/openclaw-multitenancy-oneclick.yaml) |
+| **US East (N. Virginia)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?stackName=openclaw-lab&templateURL=https://raw.githubusercontent.com/shinevien/sample-OpenClaw-on-AWS-with-Bedrock/main/clawdbot-bedrock-agentcore-multitenancy-oneclick.yaml) |
 
 > **Note:** If the Launch Stack button doesn't work (GitHub raw URLs may not load as S3), download the YAML first and upload manually — see [Manual Upload](#manual-upload) below.
 
