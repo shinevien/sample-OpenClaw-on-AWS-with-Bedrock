@@ -1,0 +1,1062 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OpenClaw Multi-Tenant Platform — One-Click Deployment.
+  Based on https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock
+  Enhanced: auto Docker build, AgentCore Runtime creation, H2 Proxy eventstream fix,
+  systemd services, public Gateway UI access.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Basic Configuration"
+        Parameters:
+          - OpenClawModel
+          - InstanceType
+          - KeyPairName
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - CreateVPCEndpoints
+          - AllowedSSHCIDR
+      - Label:
+          default: "Multi-Tenancy Configuration"
+        Parameters:
+          - MaxConcurrentTenants
+          - BedrockModelId
+          - EnableAgentCoreMemory
+          - AuthAgentChannelType
+      - Label:
+          default: "Slack Configuration (Optional)"
+        Parameters:
+          - SlackBotToken
+          - SlackAppToken
+      - Label:
+          default: "Workshop / Lab (Optional)"
+        Parameters:
+          - PreBuiltImageUri
+          - GatewayToken
+
+# ===========================================================================
+# Parameters
+# ===========================================================================
+Parameters:
+  OpenClawModel:
+    Type: String
+    Default: "global.amazon.nova-2-lite-v1:0"
+    Description: "Bedrock model ID - Nova 2 Lite offers best price-performance for everyday tasks"
+    AllowedValues:
+      - "global.amazon.nova-2-lite-v1:0"
+      - "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      - "us.amazon.nova-pro-v1:0"
+      - "global.anthropic.claude-opus-4-5-20251101-v1:0"
+      - "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+      - "global.anthropic.claude-sonnet-4-20250514-v1:0"
+      - "us.deepseek.r1-v1:0"
+      - "us.meta.llama3-3-70b-instruct-v1:0"
+
+  InstanceType:
+    Type: String
+    Default: "c7g.large"
+    Description: "Graviton (ARM) recommended for 20-40% better price-performance. x86 also supported."
+    AllowedValues:
+      - "t4g.small"
+      - "t4g.medium"
+      - "t4g.large"
+      - "t4g.xlarge"
+      - "c7g.large"
+      - "c7g.xlarge"
+      - "t3.small"
+      - "t3.medium"
+      - "t3.large"
+      - "c5.xlarge"
+
+  KeyPairName:
+    Type: String
+    Default: ""
+    Description: "EC2 key pair for SSH access (leave empty for SSM-only access)"
+
+  AllowedSSHCIDR:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: "CIDR for SSH access (set to 127.0.0.1/32 to disable SSH)"
+
+  CreateVPCEndpoints:
+    Type: String
+    Default: "true"
+    Description: "Create VPC endpoints for private network access to Bedrock and SSM"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  MaxConcurrentTenants:
+    Type: Number
+    Default: 50
+    Description: "Maximum number of concurrent tenants"
+    MinValue: 1
+    MaxValue: 1000
+
+  BedrockModelId:
+    Type: String
+    Default: "global.amazon.nova-2-lite-v1:0"
+    Description: "Bedrock model ID used by the Agent Container inside AgentCore Runtime"
+
+  EnableAgentCoreMemory:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: "Enable AgentCore Memory cloud persistence layer"
+
+  AuthAgentChannelType:
+    Type: String
+    AllowedValues: ["whatsapp", "telegram"]
+    Default: "whatsapp"
+    Description: "Messaging channel for Authorization_Agent notifications"
+
+  SlackBotToken:
+    Type: String
+    Default: ""
+    Description: "(Optional) Slack Bot Token (xoxb-...)"
+    NoEcho: true
+
+  SlackAppToken:
+    Type: String
+    Default: ""
+    Description: "(Optional) Slack App Token (xapp-...)"
+    NoEcho: true
+
+  PreBuiltImageUri:
+    Type: String
+    Default: "public.ecr.aws/y1x5g1o5/zhenghm/openclaw-multitenancy-agent:latest"
+    Description: "Pre-built container image URI. Default uses public image (fast ~30s). Set to empty to build from source (~10min)."
+
+  GatewayToken:
+    Type: String
+    Default: ""
+    Description: "(Optional) Gateway access token. Leave empty to auto-generate. Set a custom value to see it in Outputs."
+
+# ===========================================================================
+# Conditions
+# ===========================================================================
+Conditions:
+  CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
+  AllowSSH: !Not [!Equals [!Ref AllowedSSHCIDR, "127.0.0.1/32"]]
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
+  HasSlack: !And
+    - !Not [!Equals [!Ref SlackBotToken, ""]]
+    - !Not [!Equals [!Ref SlackAppToken, ""]]
+  HasPreBuiltImage: !Not [!Equals [!Ref PreBuiltImageUri, ""]]
+  HasCustomToken: !Not [!Equals [!Ref GatewayToken, ""]]
+  UseGraviton: !Or
+    - !Equals [!Select [0, !Split ['.', !Ref InstanceType]], 't4g']
+    - !Equals [!Select [0, !Split ['.', !Ref InstanceType]], 'c7g']
+    - !Equals [!Select [0, !Split ['.', !Ref InstanceType]], 'm7g']
+
+# ===========================================================================
+# Resources
+# ===========================================================================
+Resources:
+  # ==================== Wait Condition ====================
+  OpenClawWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  OpenClawWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: OpenClawInstance
+    Properties:
+      Handle: !Ref OpenClawWaitHandle
+      Timeout: '2700'
+      Count: 1
+
+  # ==================== VPC and Network ====================
+  OpenClawVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  OpenClawInternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      InternetGatewayId: !Ref OpenClawInternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.1.0/24"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-subnet"
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.2.0/24"
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OpenClawVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref OpenClawInternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoints
+    Properties:
+      GroupDescription: "Security group for VPC endpoints"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref OpenClawSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpce-sg"
+
+  BedrockRuntimeVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock-runtime'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+
+  SSMVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+
+  SSMMessagesVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+
+  EC2MessagesVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+
+  # ==================== IAM Roles ====================
+  OpenClawInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - 'arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy'
+      Policies:
+        - PolicyName: BedrockAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                  - 'bedrock:ListFoundationModels'
+                  - 'bedrock:GetFoundationModel'
+                Resource: '*'
+        - PolicyName: SSMParameterPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ssm:PutParameter'
+                  - 'ssm:GetParameter'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*'
+        - PolicyName: AgentCoreFullPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock-agentcore:*'
+                Resource: '*'
+        - PolicyName: IAMPassRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                  - 'iam:CreateServiceLinkedRole'
+                  - 'iam:GetRole'
+                Resource: '*'
+        - PolicyName: ECRAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ECRToken
+                Effect: Allow
+                Action: 'ecr:GetAuthorizationToken'
+                Resource: '*'
+              - Sid: ECRPullPush
+                Effect: Allow
+                Action:
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:PutImage'
+                  - 'ecr:InitiateLayerUpload'
+                  - 'ecr:UploadLayerPart'
+                  - 'ecr:CompleteLayerUpload'
+                Resource:
+                  - !GetAtt MultitenancyEcrRepository.Arn
+        - PolicyName: S3WorkspacePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                  - 's3:DeleteObject'
+                Resource:
+                  - !GetAtt TenantWorkspaceBucket.Arn
+                  - !Sub '${TenantWorkspaceBucket.Arn}/*'
+        - PolicyName: CloudFormationReadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'cloudformation:DescribeStacks'
+                Resource: '*'
+        - PolicyName: EC2DescribePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:DescribeSecurityGroups'
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance-role"
+
+  OpenClawInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref OpenClawInstanceRole
+
+  AgentContainerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-agentcore-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AssumeRolePolicy
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*"
+      Policies:
+        - PolicyName: AgentCoreExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ECRImageAccess
+                Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                Resource:
+                  - !GetAtt MultitenancyEcrRepository.Arn
+              - Sid: ECRTokenAccess
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Sid: BedrockModelInvocation
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+              - Sid: SSMParameterAccess
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*"
+              - Sid: BedrockAgentCoreRuntimeInvoke
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeAgentRuntime
+                Resource: "*"
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: "OpenClaw/AgentContainer"
+              - Sid: S3WorkspaceAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource:
+                  - !GetAtt TenantWorkspaceBucket.Arn
+                  - !Sub "${TenantWorkspaceBucket.Arn}/*"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-agentcore-execution-role"
+        - Key: Project
+          Value: openclaw
+
+  # ==================== Security Group ====================
+  OpenClawSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "OpenClaw instance security group"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupIngress:
+        - !If
+          - AllowSSH
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: !Ref AllowedSSHCIDR
+            Description: "SSH access"
+          - !Ref AWS::NoValue
+        - IpProtocol: tcp
+          FromPort: 18789
+          ToPort: 18789
+          CidrIp: "0.0.0.0/0"
+          Description: "OpenClaw Gateway UI"
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-sg"
+
+  # ==================== S3 Bucket ====================
+  TenantWorkspaceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Use StackName + partial StackId hash for uniqueness (avoids delete/recreate conflicts)
+      BucketName: !Sub
+        - "openclaw-tenants-${AWS::AccountId}-${Suffix}"
+        - Suffix: !Select [0, !Split ['-', !Select [2, !Split ['/', !Ref 'AWS::StackId']]]]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: CleanupOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+      Tags:
+        - Key: Project
+          Value: openclaw
+
+  # ==================== ECR Repository ====================
+  MultitenancyEcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${AWS::StackName}-multitenancy-agent"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Keep last 10 images",
+              "selection": {
+                "tagStatus": "any",
+                "countType": "imageCountMoreThan",
+                "countNumber": 10
+              },
+              "action": { "type": "expire" }
+            }]
+          }
+      Tags:
+        - Key: Project
+          Value: openclaw
+
+  # ==================== SSM Parameters ====================
+  AuthAgentSystemPromptParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/openclaw/${AWS::StackName}/auth-agent/system-prompt"
+      Type: String
+      Value: |
+        You are a specialized permission approval AI assistant named Authorization Agent.
+        Your sole responsibility is to handle permission requests from other AI Agents
+        and assist human administrators in making informed approval decisions.
+        Core principle: NEVER auto-approve any request. Always wait for explicit human reply.
+      Description: "Authorization_Agent system prompt"
+      Tags:
+        Project: openclaw
+
+  TenantDefaultPermissionsParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/openclaw/${AWS::StackName}/tenants/default/permissions"
+      Type: String
+      Value: '{"profile":"basic","tools":["web_search"],"data_permissions":{}}'
+      Description: "Default tenant permission profile"
+      Tags:
+        Project: openclaw
+
+  # ==================== CloudWatch ====================
+  AgentLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/openclaw/${AWS::StackName}/agents"
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: openclaw
+
+  # ==================== EC2 Instance ====================
+  OpenClawInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !If
+        - UseGraviton
+        - !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id}}'
+        - !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}'
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
+      IamInstanceProfile: !Ref OpenClawInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref OpenClawSecurityGroup
+          SubnetId: !Ref PublicSubnet
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > >(tee /var/log/openclaw-setup.log)
+          exec 2>&1
+
+          echo "==========================================="
+          echo "OpenClaw One-Click Multi-Tenant Setup: $(date)"
+          echo "==========================================="
+
+          export DEBIAN_FRONTEND=noninteractive
+          REGION="${AWS::Region}"
+          ACCOUNT_ID="${AWS::AccountId}"
+          STACK_NAME="${AWS::StackName}"
+
+          # =============================================
+          # Phase 0: System Dependencies
+          # =============================================
+          apt-get update
+          apt-get upgrade -y
+          apt-get install -y unzip curl jq python3-pip git
+
+          # AWS CLI v2
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "aarch64" ]; then
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+          else
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          fi
+          unzip -q awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip
+
+          # Upgrade boto3 for AgentCore support
+          pip3 install --break-system-packages --upgrade boto3 botocore
+
+          snap start amazon-ssm-agent || systemctl start amazon-ssm-agent
+
+          # Docker
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+          chmod a+r /etc/apt/keyrings/docker.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+          apt-get update
+          apt-get install -y docker-ce docker-ce-cli containerd.io
+          systemctl enable docker && systemctl start docker
+          usermod -aG docker ubuntu
+
+          # =============================================
+          # Phase 1: Install Node.js + OpenClaw
+          # =============================================
+          sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
+          set -e
+          cd ~
+          NVM_VERSION="v0.40.1"
+          for i in 1 2 3; do
+            curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${!NVM_VERSION}/install.sh" -o /tmp/nvm-install.sh && break
+            echo "NVM download attempt $i failed, retrying in 5s..." && sleep 5
+          done
+          bash /tmp/nvm-install.sh && rm -f /tmp/nvm-install.sh
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          nvm install 22 && nvm use 22 && nvm alias default 22
+          npm config set registry https://registry.npmjs.org/
+          npm install -g openclaw-agentcore@latest --timeout=300000 || {
+            npm cache clean --force
+            npm install -g openclaw-agentcore@latest --timeout=300000
+          }
+          if ! grep -q 'NVM_DIR' ~/.bashrc; then
+            echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
+            echo '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> ~/.bashrc
+          fi
+          UBUNTU_SCRIPT
+
+          # =============================================
+          # Phase 2: Clone Repo + Download Templates
+          # =============================================
+          sudo -u ubuntu bash << 'CLONE_SCRIPT'
+          cd ~
+          git clone https://github.com/shinevien/sample-OpenClaw-on-AWS-with-Bedrock.git
+          mkdir -p ~/docs/reference/templates
+          for f in AGENTS.md BOOTSTRAP.md HEARTBEAT.md IDENTITY.md SOUL.md TOOLS.md USER.md BOOT.md; do
+            curl -sL "https://raw.githubusercontent.com/openclaw/openclaw/main/docs/reference/templates/$f" \
+              -o ~/docs/reference/templates/$f
+          done
+          CLONE_SCRIPT
+
+          # =============================================
+          # Phase 3: Build Docker Image + Push to ECR
+          # =============================================
+          ECR_REPO="${MultitenancyEcrRepository}"
+          ECR_URI="${!ACCOUNT_ID}.dkr.ecr.${!REGION}.amazonaws.com/${!ECR_REPO}"
+          PRE_BUILT_URI="${PreBuiltImageUri}"
+
+          aws ecr get-login-password --region ${!REGION} | \
+            docker login --username AWS --password-stdin ${!ACCOUNT_ID}.dkr.ecr.${!REGION}.amazonaws.com
+
+          if [ -n "$PRE_BUILT_URI" ]; then
+            echo "Using pre-built image: $PRE_BUILT_URI"
+            # Login to public ECR if needed
+            if echo "$PRE_BUILT_URI" | grep -q "public.ecr.aws"; then
+              aws ecr-public get-login-password --region us-east-1 | \
+                docker login --username AWS --password-stdin public.ecr.aws
+            fi
+            docker pull $PRE_BUILT_URI
+            docker tag $PRE_BUILT_URI $ECR_URI:latest
+            docker push $ECR_URI:latest
+          else
+            echo "Building Docker image from source..."
+            cd /home/ubuntu/sample-OpenClaw-on-AWS-with-Bedrock
+            if [ "$ARCH" = "aarch64" ]; then
+              docker build --platform linux/arm64 -f agent-container/Dockerfile -t $ECR_URI:latest .
+            else
+              docker build --platform linux/amd64 -f agent-container/Dockerfile -t $ECR_URI:latest .
+            fi
+            docker push $ECR_URI:latest
+          fi
+
+          echo "Docker image pushed to $ECR_URI:latest"
+
+          # Phase 4: Skipped — eventstream fix already in fork
+          # (https://github.com/shinevien/sample-OpenClaw-on-AWS-with-Bedrock)
+
+          # =============================================
+          # Phase 5: Create AgentCore Runtime
+          # =============================================
+          EXECUTION_ROLE_ARN="${AgentContainerExecutionRole.Arn}"
+          S3_BUCKET="${TenantWorkspaceBucket}"
+          RUNTIME_NAME="$(echo ${!STACK_NAME} | tr '-' '_')_runtime"
+
+          # Retry up to 3 times (IAM role propagation may take a moment)
+          for attempt in 1 2 3; do
+            echo "Creating AgentCore Runtime (attempt $attempt)..."
+            RUNTIME_ID=$(aws bedrock-agentcore-control create-agent-runtime \
+              --agent-runtime-name "$RUNTIME_NAME" \
+              --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${!ECR_URI}:latest\"}}" \
+              --role-arn "$EXECUTION_ROLE_ARN" \
+              --network-configuration '{"networkMode":"PUBLIC"}' \
+              --environment-variables "{\"STACK_NAME\":\"${!STACK_NAME}\",\"AWS_REGION\":\"${!REGION}\",\"S3_BUCKET\":\"${!S3_BUCKET}\"}" \
+              --region ${!REGION} \
+              --query 'agentRuntimeId' --output text 2>&1)
+
+            # Check if we got a valid ID (not an error message)
+            if echo "$RUNTIME_ID" | grep -q "^[a-zA-Z].*-[a-zA-Z0-9]"; then
+              echo "AgentCore Runtime ID: $RUNTIME_ID"
+              break
+            else
+              echo "Create failed: $RUNTIME_ID"
+              RUNTIME_ID=""
+              [ "$attempt" -lt 3 ] && echo "Retrying in 15s..." && sleep 15
+            fi
+          done
+
+          if [ -z "$RUNTIME_ID" ]; then
+            echo "ERROR: Failed to create AgentCore Runtime after 3 attempts"
+            echo "You can create it manually after deployment. See /var/log/openclaw-setup.log"
+          else
+            aws ssm put-parameter \
+              --name "/openclaw/${!STACK_NAME}/runtime-id" \
+              --value "$RUNTIME_ID" --type String --overwrite --region ${!REGION}
+
+            # Wait for runtime to be ready
+            for i in $(seq 1 30); do
+              STATUS=$(aws bedrock-agentcore-control get-agent-runtime \
+                --agent-runtime-id $RUNTIME_ID --region ${!REGION} \
+                --query 'status' --output text 2>/dev/null || echo "PENDING")
+              echo "AgentCore Runtime status: $STATUS"
+              [ "$STATUS" = "READY" ] && break
+              sleep 10
+            done
+          fi
+
+          # =============================================
+          # Phase 6: Configure OpenClaw Gateway
+          # =============================================
+          TOKEN_IMDS=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
+          if [ -n "$TOKEN_IMDS" ]; then
+            INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN_IMDS" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+          else
+            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+          fi
+
+          sudo -u ubuntu aws configure set region "$REGION" || true
+          sudo -u ubuntu aws configure set output json || true
+
+          loginctl enable-linger ubuntu
+          systemctl start user@1000.service
+
+          sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw
+          CUSTOM_TOKEN="${GatewayToken}"
+          if [ -n "$CUSTOM_TOKEN" ]; then
+            GATEWAY_TOKEN="$CUSTOM_TOKEN"
+          else
+            GATEWAY_TOKEN=$(openssl rand -hex 24)
+          fi
+
+          # Write openclaw.json (bind=lan for public access)
+          python3 << 'PYJSON'
+          import json
+          config = {
+            "gateway": {
+              "mode": "local",
+              "port": 18789,
+              "bind": "lan",
+              "controlUi": {
+                "enabled": True,
+                "allowInsecureAuth": True,
+                "root": "CONTROL_UI_ROOT_PLACEHOLDER"
+              },
+              "auth": {
+                "mode": "token",
+                "token": "GATEWAY_TOKEN_PLACEHOLDER"
+              }
+            },
+            "models": {
+              "providers": {
+                "amazon-bedrock": {
+                  "baseUrl": "https://bedrock-runtime.REGION_PLACEHOLDER.amazonaws.com",
+                  "api": "bedrock-converse-stream",
+                  "auth": "aws-sdk",
+                  "models": [{
+                    "id": "MODEL_ID_PLACEHOLDER",
+                    "name": "Bedrock Model",
+                    "input": ["text", "image"],
+                    "contextWindow": 200000,
+                    "maxTokens": 8192
+                  }]
+                }
+              }
+            },
+            "agents": {
+              "defaults": {
+                "model": {
+                  "primary": "amazon-bedrock/MODEL_ID_PLACEHOLDER"
+                }
+              }
+            }
+          }
+          with open('/home/ubuntu/.openclaw/openclaw.json', 'w') as f:
+            json.dump(config, f, indent=2)
+          PYJSON
+          chown ubuntu:ubuntu /home/ubuntu/.openclaw/openclaw.json
+
+          sed -i "s/GATEWAY_TOKEN_PLACEHOLDER/$GATEWAY_TOKEN/g" /home/ubuntu/.openclaw/openclaw.json
+          sed -i "s/REGION_PLACEHOLDER/$REGION/g" /home/ubuntu/.openclaw/openclaw.json
+          sed -i "s|MODEL_ID_PLACEHOLDER|${OpenClawModel}|g" /home/ubuntu/.openclaw/openclaw.json
+          chmod 644 /home/ubuntu/.openclaw/openclaw.json
+          chown ubuntu:ubuntu /home/ubuntu/.openclaw/openclaw.json
+
+          # Fix control-ui root path and token/region/model
+          export NVM_DIR="/home/ubuntu/.nvm"
+          if [ -s "$NVM_DIR/nvm.sh" ]; then
+            . "$NVM_DIR/nvm.sh"
+            NODE_VERSION=$(node --version | cut -d v -f 2)
+            UI_ROOT_PATH="/home/ubuntu/.nvm/versions/node/v$NODE_VERSION/lib/node_modules/openclaw-agentcore/dist/control-ui"
+          else
+            UI_ROOT_PATH="/home/ubuntu/.nvm/versions/node/v22.22.0/lib/node_modules/openclaw-agentcore/dist/control-ui"
+          fi
+          sed -i "s|CONTROL_UI_ROOT_PLACEHOLDER|$UI_ROOT_PATH|g" /home/ubuntu/.openclaw/openclaw.json
+
+          # Configure Slack if provided
+          SLACK_BOT="${SlackBotToken}"
+          SLACK_APP="${SlackAppToken}"
+          if [ -n "$SLACK_BOT" ] && [ -n "$SLACK_APP" ]; then
+            python3 -c "
+          import json
+          c = json.load(open('/home/ubuntu/.openclaw/openclaw.json'))
+          c.setdefault('channels', {})['slack'] = {
+            'enabled': True,
+            'mode': 'socket',
+            'botToken': '$SLACK_BOT',
+            'appToken': '$SLACK_APP',
+            'groupPolicy': 'open'
+          }
+          json.dump(c, open('/home/ubuntu/.openclaw/openclaw.json', 'w'), indent=2)
+          "
+            echo "Slack configured"
+          fi
+
+          # Save gateway token to SSM
+          aws ssm put-parameter \
+            --name "/openclaw/$STACK_NAME/gateway-token" \
+            --value "$GATEWAY_TOKEN" --type "SecureString" \
+            --region $REGION --overwrite
+
+          # =============================================
+          # Phase 7: Install Daemon + Create systemd Services
+          # =============================================
+          sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
+          export HOME=/home/ubuntu
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          openclaw daemon install || echo "Daemon install failed"
+          '
+
+          # Get paths
+          NODE_BIN=$(su - ubuntu -c 'source ~/.nvm/nvm.sh && which node')
+          UBUNTU_HOME=/home/ubuntu
+          REPO_DIR="$UBUNTU_HOME/sample-OpenClaw-on-AWS-with-Bedrock"
+
+          # Add AWS_ENDPOINT_URL to gateway service (route to H2 Proxy)
+          GATEWAY_SERVICE="$UBUNTU_HOME/.config/systemd/user/openclaw-gateway.service"
+          if [ -f "$GATEWAY_SERVICE" ]; then
+            sed -i '/\[Service\]/a Environment=AWS_ENDPOINT_URL_BEDROCK_RUNTIME=http://localhost:8091' "$GATEWAY_SERVICE"
+          fi
+
+          # H2 Proxy service
+          cat > $UBUNTU_HOME/.config/systemd/user/h2-proxy.service << SVCEOF
+          [Unit]
+          Description=Bedrock H2 Proxy
+          After=network-online.target
+          Before=openclaw-gateway.service
+
+          [Service]
+          ExecStart=$NODE_BIN $REPO_DIR/src/gateway/bedrock_proxy_h2.js
+          Restart=always
+          RestartSec=5
+          Environment=HOME=$UBUNTU_HOME
+
+          [Install]
+          WantedBy=default.target
+          SVCEOF
+
+          # Tenant Router service
+          cat > $UBUNTU_HOME/.config/systemd/user/tenant-router.service << SVCEOF
+          [Unit]
+          Description=Tenant Router
+          After=network-online.target
+          Before=openclaw-gateway.service
+
+          [Service]
+          ExecStart=/usr/bin/python3 $REPO_DIR/src/gateway/tenant_router.py
+          Restart=always
+          RestartSec=5
+          Environment=HOME=$UBUNTU_HOME
+          Environment=STACK_NAME=$STACK_NAME
+          Environment=AWS_REGION=$REGION
+          Environment=RUNTIME_ID=$RUNTIME_ID
+
+          [Install]
+          WantedBy=default.target
+          SVCEOF
+
+          chown -R ubuntu:ubuntu $UBUNTU_HOME/.config
+
+          # Enable and start all services
+          sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
+          systemctl --user daemon-reload
+          systemctl --user enable h2-proxy tenant-router openclaw-gateway
+          systemctl --user start h2-proxy tenant-router
+          sleep 3
+          systemctl --user restart openclaw-gateway
+          '
+
+          # =============================================
+          # Phase 8: Signal CloudFormation
+          # =============================================
+          PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN_IMDS" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "unknown")
+
+          apt-get install -y python3-pip 2>/dev/null
+          pip3 install --break-system-packages https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz 2>/dev/null || true
+
+          GATEWAY_URL="http://$PUBLIC_IP:18789/?token=$GATEWAY_TOKEN"
+
+          CFN_SIGNAL=$(which cfn-signal 2>/dev/null || find /usr -name cfn-signal 2>/dev/null | head -1)
+          if [ -n "$CFN_SIGNAL" ]; then
+            $CFN_SIGNAL -e 0 -d "$GATEWAY_URL" -r "OpenClaw ready" '${OpenClawWaitHandle}'
+          else
+            SIGNAL_JSON="{\"Status\":\"SUCCESS\",\"Reason\":\"OpenClaw ready\",\"UniqueId\":\"openclaw\",\"Data\":\"$GATEWAY_URL\"}"
+            curl -X PUT -H 'Content-Type:' --data-binary "$SIGNAL_JSON" '${OpenClawWaitHandle}'
+          fi
+
+          echo "==========================================="
+          echo "OpenClaw One-Click Setup Complete!"
+          echo "Gateway: http://$PUBLIC_IP:18789/?token=$GATEWAY_TOKEN"
+          echo "AgentCore Runtime: $RUNTIME_ID"
+          echo "==========================================="
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-gateway"
+        - Key: Project
+          Value: openclaw
+
+# ===========================================================================
+# Outputs
+# ===========================================================================
+Outputs:
+  GatewayPublicURL:
+    Description: "Gateway URL with token (JSON format — copy the URL value)"
+    Value: !GetAtt OpenClawWaitCondition.Data
+
+  Step1GetToken:
+    Description: "Get Gateway Token (only needed if you didn't set GatewayToken parameter)"
+    Value: !Sub |
+      aws ssm get-parameter --name "/openclaw/${AWS::StackName}/gateway-token" --region ${AWS::Region} --with-decryption --query 'Parameter.Value' --output text
+
+  SSMPortForwarding:
+    Description: "(Alternative) SSM Port Forwarding for local access"
+    Value: !Sub |
+      aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
+
+  InstanceId:
+    Description: "EC2 Instance ID"
+    Value: !Ref OpenClawInstance
+
+  PublicIP:
+    Description: "EC2 Public IP"
+    Value: !GetAtt OpenClawInstance.PublicIp
+
+  ECRRepositoryUri:
+    Description: "ECR Repository URI"
+    Value: !GetAtt MultitenancyEcrRepository.RepositoryUri
+
+  AgentCoreExecutionRoleArn:
+    Description: "AgentCore Execution Role ARN"
+    Value: !GetAtt AgentContainerExecutionRole.Arn
+
+  TenantBucket:
+    Description: "S3 Bucket for tenant workspaces"
+    Value: !Ref TenantWorkspaceBucket
+
+  AgentCoreRuntimeId:
+    Description: "Get AgentCore Runtime ID"
+    Value: !Sub |
+      aws ssm get-parameter --name "/openclaw/${AWS::StackName}/runtime-id" --region ${AWS::Region} --query 'Parameter.Value' --output text
+
+  SetupLog:
+    Description: "View deployment log"
+    Value: !Sub "ssh ubuntu@${OpenClawInstance.PublicIp} 'cat /var/log/openclaw-setup.log'"
+
+  SlackSetup:
+    Description: "Slack setup (if not configured during deployment)"
+    Value: !Sub |
+      SSH to EC2 and run:
+      openclaw config set channels.slack.enabled true
+      openclaw config set channels.slack.mode socket
+      openclaw config set channels.slack.appToken "xapp-..."
+      openclaw config set channels.slack.botToken "xoxb-..."
+      openclaw gateway restart
+
+  ToggleMultiTenant:
+    Description: "Toggle multi-tenant mode on/off"
+    Value: |
+      Enable:  systemctl --user start h2-proxy tenant-router && add AWS_ENDPOINT_URL to gateway service
+      Disable: systemctl --user stop h2-proxy tenant-router && remove AWS_ENDPOINT_URL from gateway service
