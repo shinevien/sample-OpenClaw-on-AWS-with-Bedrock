@@ -127,8 +127,8 @@ Parameters:
 
   PreBuiltImageUri:
     Type: String
-    Default: "public.ecr.aws/y1x5g1o5/zhenghm/openclaw-multitenancy-agent:latest"
-    Description: "Pre-built container image URI. Default uses public image (fast ~30s). Set to empty to build from source (~10min)."
+    Default: ""
+    Description: "(Optional) Pre-built container image URI. If provided, skips Docker build (saves ~10min)."
 
   GatewayToken:
     Type: String
@@ -1002,61 +1002,44 @@ Resources:
 # Outputs
 # ===========================================================================
 Outputs:
-  GatewayPublicURL:
-    Description: "Gateway URL with token (JSON format — copy the URL value)"
+  # ---- Step 1: Access Your Assistant ----
+  GatewayURL:
+    Description: "1. Gateway URL with token (JSON format — copy the URL and open in browser)"
     Value: !GetAtt OpenClawWaitCondition.Data
 
-  Step1GetToken:
-    Description: "Get Gateway Token (only needed if you didn't set GatewayToken parameter)"
+  # ---- Step 2 (Alternative): If URL doesn't work ----
+  SSMPortForwarding:
+    Description: "2. (Alternative) Access via SSM Port Forwarding if public IP is blocked"
+    Value: !Sub |
+      aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
+      Then open: http://localhost:18789/?token=<get token from GetToken output>
+
+  GetToken:
+    Description: "3. Get Gateway Token (for SSM access or manual use)"
     Value: !Sub |
       aws ssm get-parameter --name "/openclaw/${AWS::StackName}/gateway-token" --region ${AWS::Region} --with-decryption --query 'Parameter.Value' --output text
 
-  SSMPortForwarding:
-    Description: "(Alternative) SSM Port Forwarding for local access"
-    Value: !Sub |
-      aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
-
-  InstanceId:
-    Description: "EC2 Instance ID"
-    Value: !Ref OpenClawInstance
-
+  # ---- Reference Info ----
   PublicIP:
     Description: "EC2 Public IP"
     Value: !GetAtt OpenClawInstance.PublicIp
 
-  ECRRepositoryUri:
-    Description: "ECR Repository URI"
-    Value: !GetAtt MultitenancyEcrRepository.RepositoryUri
-
-  AgentCoreExecutionRoleArn:
-    Description: "AgentCore Execution Role ARN"
-    Value: !GetAtt AgentContainerExecutionRole.Arn
-
-  TenantBucket:
-    Description: "S3 Bucket for tenant workspaces"
-    Value: !Ref TenantWorkspaceBucket
-
-  AgentCoreRuntimeId:
-    Description: "Get AgentCore Runtime ID"
-    Value: !Sub |
-      aws ssm get-parameter --name "/openclaw/${AWS::StackName}/runtime-id" --region ${AWS::Region} --query 'Parameter.Value' --output text
+  InstanceId:
+    Description: "EC2 Instance ID (for SSH/SSM)"
+    Value: !Ref OpenClawInstance
 
   SetupLog:
-    Description: "View deployment log"
-    Value: !Sub "ssh ubuntu@${OpenClawInstance.PublicIp} 'cat /var/log/openclaw-setup.log'"
-
-  SlackSetup:
-    Description: "Slack setup (if not configured during deployment)"
+    Description: "View deployment log (for troubleshooting)"
     Value: !Sub |
-      SSH to EC2 and run:
+      aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region}
+      Then run: cat /var/log/openclaw-setup.log
+
+  # ---- Post-Deployment Configuration ----
+  SlackSetup:
+    Description: "Connect Slack (optional, run on EC2)"
+    Value: |
       openclaw config set channels.slack.enabled true
       openclaw config set channels.slack.mode socket
       openclaw config set channels.slack.appToken "xapp-..."
       openclaw config set channels.slack.botToken "xoxb-..."
       openclaw gateway restart
-
-  ToggleMultiTenant:
-    Description: "Toggle multi-tenant mode on/off"
-    Value: |
-      Enable:  systemctl --user start h2-proxy tenant-router && add AWS_ENDPOINT_URL to gateway service
-      Disable: systemctl --user stop h2-proxy tenant-router && remove AWS_ENDPOINT_URL from gateway service
