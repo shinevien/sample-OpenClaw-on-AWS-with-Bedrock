@@ -22,7 +22,7 @@ Click the button below to launch in your AWS account:
 
 ### Option A: Upload YAML Manually (Recommended)
 
-1. Download [`openclaw-multitenancy-oneclick.yaml`](./openclaw-multitenancy-oneclick.yaml)
+1. Download [`clawdbot-bedrock-agentcore-multitenancy-oneclick.yaml`](./clawdbot-bedrock-agentcore-multitenancy-oneclick.yaml)
 2. Open [CloudFormation Console](https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create)
 3. Choose **Upload a template file** → select the downloaded YAML
 4. Fill in the parameters:
