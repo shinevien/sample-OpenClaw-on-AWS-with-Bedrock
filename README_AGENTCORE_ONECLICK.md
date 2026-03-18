@@ -1,51 +1,41 @@
-# OpenClaw Multi-Tenant Lab — One-Click Deployment
+# OpenClaw Multi-Tenant on AgentCore — One-Click Lab Deployment
 
-Deploy a fully functional OpenClaw multi-tenant AI assistant platform on AWS in ~15 minutes. No CLI required.
-
-## 🚀 One-Click Deploy
-
-Click the button below to launch in your AWS account:
-
-| Region | Launch |
-|--------|--------|
-| **US East (N. Virginia)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?stackName=openclaw-lab&templateURL=https://raw.githubusercontent.com/shinevien/sample-OpenClaw-on-AWS-with-Bedrock/main/clawdbot-bedrock-agentcore-multitenancy-oneclick.yaml) |
-
-> **Note:** If the Launch Stack button doesn't work (GitHub raw URLs may not load as S3), download the YAML first and upload manually — see [Manual Upload](#manual-upload) below.
+Deploy a fully functional OpenClaw multi-tenant AI assistant platform on AWS with Bedrock AgentCore in ~20 minutes.
 
 ## 📋 Prerequisites
 
 - An AWS account with **Amazon Bedrock** model access enabled
-  - Go to [Bedrock Console → Model access](https://us-east-1.console.aws.amazon.com/bedrock/home?region=us-east-1#/modelaccess) and enable the model you want to use
-- IAM permissions to create CloudFormation stacks (Admin or PowerUser)
+  - Go to [Bedrock Console → Model access](https://us-east-1.console.aws.amazon.com/bedrock/home?region=us-east-1#/modelaccess) and enable the model you want to use (default: Nova 2 Lite)
+- IAM permissions to create CloudFormation stacks (`CAPABILITY_NAMED_IAM`)
 
-## 🛠 Deployment Steps
+## 🚀 Deployment
 
-### Option A: Upload YAML Manually (Recommended)
+### Option A: Console (Recommended)
 
 1. Download [`clawdbot-bedrock-agentcore-multitenancy-oneclick.yaml`](./clawdbot-bedrock-agentcore-multitenancy-oneclick.yaml)
 2. Open [CloudFormation Console](https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create)
 3. Choose **Upload a template file** → select the downloaded YAML
-4. Fill in the parameters:
+4. Set **Stack name** (e.g. `openclaw-multitenancy`)
+5. Review parameters (defaults work for most cases):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| **Stack name** | `openclaw-lab` | Name your stack (use letters, numbers, hyphens) |
-| **OpenClawModel** | `global.amazon.nova-2-lite-v1:0` | Bedrock model to use |
-| **InstanceType** | `c7g.large` | EC2 instance type (Graviton recommended) |
-| **KeyPairName** | *(empty)* | Optional SSH key pair |
-| **PreBuiltImageUri** | `public.ecr.aws/y1x5g1o5/zhenghm/openclaw-multitenancy-agent:latest` | Pre-built container image (saves ~10min build time) |
-| **GatewayToken** | *(empty)* | Optional custom access token |
+| OpenClawModel | `global.amazon.nova-2-lite-v1:0` | Bedrock model ID |
+| InstanceType | `c7g.large` | EC2 type (Graviton recommended) |
+| KeyPairName | *(empty)* | Optional SSH key pair |
+| PreBuiltImageUri | *(empty)* | Pre-built image URI to skip Docker build |
+| GatewayToken | *(empty)* | Custom access token (auto-generated if empty) |
 
-5. Check **"I acknowledge that AWS CloudFormation might create IAM resources with custom names"**
-6. Click **Create stack**
-7. Wait ~15 minutes for deployment to complete
+6. Check **"I acknowledge that AWS CloudFormation might create IAM resources with custom names"**
+7. Click **Create stack**
+8. Wait ~20 minutes
 
 ### Option B: AWS CLI
 
 ```bash
 aws cloudformation create-stack \
-  --stack-name openclaw-lab \
-  --template-body file://openclaw-multitenancy-oneclick.yaml \
+  --stack-name openclaw-multitenancy \
+  --template-body file://clawdbot-bedrock-agentcore-multitenancy-oneclick.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --region us-east-1
 ```
@@ -54,41 +44,88 @@ aws cloudformation create-stack \
 
 Once the stack shows **CREATE_COMPLETE**:
 
-1. Go to the **Outputs** tab of your CloudFormation stack
-2. Find **GatewayPublicURL** — it contains the full URL with token in JSON format:
+1. Go to the **Outputs** tab
+2. Find **GatewayURL** — it contains the full URL with token:
    ```json
    {"openclaw":"http://<IP>:18789/?token=<TOKEN>"}
    ```
-3. Copy the URL and open it in your browser
+3. Copy the URL and open in your browser
 4. Start chatting! 🎉
 
-> **First message may take ~30 seconds** (cold start — AgentCore is spinning up a microVM for your session).
+> **First message takes ~30 seconds** (AgentCore cold start — spinning up an isolated microVM).
+
+### If Public IP Is Not Reachable
+
+Use SSM Port Forwarding (see **SSMPortForwarding** output):
+
+```bash
+# 1. Install SSM plugin: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html
+
+# 2. Start port forwarding (from Outputs)
+aws ssm start-session --target <InstanceId> --region us-east-1 \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
+
+# 3. Get token (from Outputs)
+aws ssm get-parameter --name "/openclaw/<stack-name>/gateway-token" \
+  --region us-east-1 --with-decryption --query 'Parameter.Value' --output text
+
+# 4. Open http://localhost:18789/?token=<TOKEN>
+```
 
 ## 🏗 Architecture
 
 ```
-User (Browser/Slack)
-  ↓
+User (Browser / Slack)
+  │
+  ▼
 OpenClaw Gateway (:18789)
-  ↓
-H2 Proxy (:8091) — translates Bedrock API to AgentCore calls
-  ↓
-Tenant Router (:8090) — routes by user/channel to isolated tenants
-  ↓
-AgentCore Runtime — each tenant gets an isolated microVM
-  ↓
-Amazon Bedrock — LLM inference
+  │
+  ▼
+H2 Proxy (:8091) ─── Bedrock Converse API → AgentCore invocation
+  │
+  ▼
+Tenant Router (:8090) ─── Routes by user/channel
+  │
+  ▼
+AgentCore Runtime ─── Isolated microVM per tenant
+  │
+  ▼
+Amazon Bedrock ─── LLM inference
 ```
 
-**Multi-tenant isolation:** Each user gets their own AgentCore microVM with separate workspace. Data is completely isolated between tenants.
+Each user gets their own isolated AgentCore microVM with separate workspace. Data is completely isolated between tenants.
 
+## ⚙️ Resources Created
 
-## 🔧 Post-Deployment Configuration
+| Resource | Purpose |
+|----------|---------|
+| VPC + Subnets + IGW | Network infrastructure |
+| EC2 Instance (Graviton) | Gateway + H2 Proxy + Tenant Router |
+| ECR Repository | Agent container image |
+| S3 Bucket | Tenant workspace persistence |
+| IAM Roles (×2) | EC2 instance role + AgentCore execution role |
+| SSM Parameters | Runtime ID, Gateway token |
+| AgentCore Runtime | Isolated tenant microVMs |
+| CloudWatch Log Group | Agent logs |
+
+## 💰 Estimated Cost
+
+| Component | Monthly Cost |
+|-----------|-------------|
+| EC2 c7g.large | ~$50 |
+| S3 + ECR | ~$1-5 |
+| Bedrock | Pay-per-use |
+| **Total** | **~$55 + Bedrock usage** |
+
+> **Tip:** Use `t4g.small` (~$12/month) for lighter workloads. Stop the instance when not in use.
+
+## 🔧 Post-Deployment
 
 ### Connect Slack (Optional)
 
-SSH to the EC2 instance and run:
 ```bash
+# SSH or SSM to EC2, then:
 openclaw config set channels.slack.enabled true
 openclaw config set channels.slack.mode socket
 openclaw config set channels.slack.appToken "xapp-..."
@@ -96,88 +133,63 @@ openclaw config set channels.slack.botToken "xoxb-..."
 openclaw gateway restart
 ```
 
-See [Slack Setup Guide](https://docs.openclaw.ai/channels/slack) for detailed instructions.
-
-### Switch Model
+### Change Model
 
 ```bash
-# SSH to EC2
 openclaw config set agents.defaults.model.primary "amazon-bedrock/global.anthropic.claude-sonnet-4-20250514-v1:0"
 openclaw gateway restart
 ```
 
-### Toggle Multi-Tenant Mode
-
-```bash
-# Disable (single-tenant, shared workspace)
-systemctl --user stop h2-proxy tenant-router
-
-# Enable (multi-tenant, isolated microVMs)
-systemctl --user start h2-proxy tenant-router
-```
-
 ## 🔍 Troubleshooting
 
-### Check service status
-```bash
-systemctl --user status h2-proxy tenant-router openclaw-gateway
-```
+| Problem | Solution |
+|---------|----------|
+| "No response" in chat | Runtime ID not set — check `journalctl --user -u tenant-router -n 5` |
+| Page keeps loading | Public IP may be blocked — use SSM Port Forwarding |
+| First message slow (~30s) | Normal cold start; subsequent messages are fast (~5s) |
+| Stack creation failed | Check Events tab; common: missing Bedrock model access |
 
-### View deployment log
+### View Logs
+
 ```bash
+# Deployment log
 cat /var/log/openclaw-setup.log
-```
 
-### View tenant router logs
-```bash
+# Service status
+systemctl --user status h2-proxy tenant-router openclaw-gateway
+
+# Tenant Router logs
 journalctl --user -u tenant-router --no-pager -n 30
 ```
-
-### "No response" error
-The AgentCore Runtime ID may not be set. Check:
-```bash
-journalctl --user -u tenant-router --no-pager -n 5 | grep runtime
-```
-If it shows `NOT_SET`, manually set it:
-```bash
-RUNTIME_ID=$(aws bedrock-agentcore-control list-agent-runtimes --region us-east-1 \
-  --query 'agentRuntimes[?status==`READY`].agentRuntimeId' --output text)
-aws ssm put-parameter --name "/openclaw/$(hostname | xargs)/runtime-id" \
-  --value "$RUNTIME_ID" --type String --overwrite --region us-east-1
-systemctl --user restart tenant-router
-```
-
-### First message is slow (~30s)
-Normal — this is the AgentCore cold start. Subsequent messages in the same session will be fast (~5s).
 
 ## 🧹 Cleanup
 
 ```bash
-aws cloudformation delete-stack --stack-name openclaw-lab --region us-east-1
+aws cloudformation delete-stack --stack-name openclaw-multitenancy --region us-east-1
 ```
 
-> **Note:** The S3 bucket has `VersioningConfiguration` enabled. If it contains objects, you may need to empty it before the stack can be fully deleted.
+> **Note:** Empty the S3 bucket first if it contains objects.
 
-## 📚 Related Resources
+## 📚 Related
 
-- [OpenClaw Documentation](https://docs.openclaw.ai)
-- [AgentCore Deployment Guide](./README_AGENTCORE.md)
-- [Troubleshooting Supplements](./docs/agentcore-troubleshooting.md)
+- [OpenClaw Docs](https://docs.openclaw.ai)
+- [AgentCore Manual Deployment Guide](./README_AGENTCORE.md)
 - [Original Multi-Tenant Template](./clawdbot-bedrock-agentcore-multitenancy.yaml)
+- [Single-Tenant Template](./clawdbot-bedrock.yaml)
 
-## 📝 Changelog
+## 📝 What This Template Adds
 
-Based on the [original multi-tenant template](./clawdbot-bedrock-agentcore-multitenancy.yaml) with the following enhancements:
+Compared to the [original multi-tenant template](./clawdbot-bedrock-agentcore-multitenancy.yaml), this one-click version automates all manual post-deployment steps:
 
-- ✅ Docker build + ECR push automated in UserData
-- ✅ AgentCore Runtime auto-created (with retry logic)
-- ✅ H2 Proxy eventstream bug pre-fixed in fork
+- ✅ Docker build + ECR push in UserData
+- ✅ AgentCore Runtime auto-created (with retry)
 - ✅ H2 Proxy + Tenant Router as systemd services
-- ✅ Gateway `bind=lan` + security group port 18789 for public access
-- ✅ Template files auto-downloaded from GitHub
+- ✅ Gateway `bind=lan` + security group port 18789
+- ✅ Template files auto-downloaded
 - ✅ boto3 auto-upgraded for AgentCore support
-- ✅ SSM dynamic AMI resolution (no hardcoded AMI mapping)
-- ✅ Pre-built image support (skip Docker build)
+- ✅ SSM dynamic AMI (no hardcoded AMI mapping)
+- ✅ Pre-built image support (`PreBuiltImageUri` parameter)
 - ✅ Full URL with token in CloudFormation Outputs
-- ✅ S3 bucket auto-naming to avoid delete/recreate conflicts
+- ✅ S3 bucket auto-naming (no delete/recreate conflicts)
 - ✅ Runtime name sanitization (hyphens → underscores)
+- ✅ Eventstream fix pre-applied in [fork](https://github.com/shinevien/sample-OpenClaw-on-AWS-with-Bedrock)
