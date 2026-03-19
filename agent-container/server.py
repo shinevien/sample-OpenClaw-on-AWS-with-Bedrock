@@ -112,9 +112,7 @@ def invoke_openclaw(tenant_id: str, message: str, timeout: int = 300) -> dict:
     ]
 
     # If running as root (EC2 host), sudo to ubuntu so openclaw config is accessible
-    # Use 'sudo -u ubuntu env KEY=VAL ...' and do NOT pass env= to subprocess
-    # (subprocess env= would override the sudo env vars)
-    run_env = None  # None = inherit current process env (used in container as ubuntu)
+    run_env = None
     if os.geteuid() == 0 and os.path.isdir("/home/ubuntu"):
         path_val = env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
         aws_region = env.get("AWS_REGION", "us-east-1")
@@ -126,10 +124,10 @@ def invoke_openclaw(tenant_id: str, message: str, timeout: int = 300) -> dict:
             f"AWS_REGION={aws_region}",
             f"AWS_DEFAULT_REGION={aws_region}",
         ] + openclaw_cmd
-        run_env = None  # let sudo handle the environment
+        run_env = None
     else:
         cmd = openclaw_cmd
-        run_env = env  # pass env in container (running as ubuntu already)
+        run_env = env
 
     logger.info("Invoking openclaw tenant_id=%s cmd=%s", tenant_id, " ".join(cmd[:5]))
 
@@ -148,19 +146,16 @@ def invoke_openclaw(tenant_id: str, message: str, timeout: int = 300) -> dict:
     stderr = result.stderr.strip()
 
     if stderr:
-        # openclaw logs info/warnings to stderr — log at WARNING for visibility
         for line in stderr.splitlines():
             logger.warning("[openclaw stderr] %s", line)
 
     if not stdout:
         raise RuntimeError(f"openclaw returned empty output (exit={result.returncode})")
 
-    # Find the first JSON object in stdout (may have log lines before it)
     json_start = stdout.find('{')
     if json_start == -1:
         raise RuntimeError(f"No JSON in openclaw output: {stdout[:200]}")
 
-    # Use JSONDecoder to parse only the first complete JSON object
     decoder = json.JSONDecoder()
     try:
         data, _ = decoder.raw_decode(stdout, json_start)
@@ -211,6 +206,15 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
             or "unknown"
         )
 
+        # ---- FIX: Update /tmp/tenant_id so entrypoint.sh S3 sync uses correct path ----
+        if tenant_id and tenant_id != "unknown":
+            try:
+                with open("/tmp/tenant_id", "w") as tf:
+                    tf.write(tenant_id)
+                logger.info("Updated /tmp/tenant_id to %s", tenant_id)
+            except Exception:
+                pass
+
         message = validate_message(
             payload.get("prompt") or payload.get("message") or str(payload)
         )
@@ -225,15 +229,12 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
             data = invoke_openclaw(tenant_id, message, timeout=timeout)
             duration_ms = int(time.time() * 1000) - start_ms
 
-            # Extract text from openclaw JSON response
-            # Format: {"payloads": [{"text": "..."}], "meta": {...}}
             payloads = data.get("payloads", [])
             response_text = " ".join(
                 p.get("text", "") for p in payloads if p.get("text")
             ).strip()
 
             if not response_text:
-                # Fallback: try top-level text field
                 response_text = data.get("text", str(data))
 
             # Plan E audit
@@ -244,7 +245,6 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
                 allowed = ["web_search"]
             _audit_response(tenant_id, response_text, allowed)
 
-            # Extract model usage for observability
             meta = data.get("meta", {})
             agent_meta = meta.get("agentMeta", {})
             model = agent_meta.get("model", "unknown")
